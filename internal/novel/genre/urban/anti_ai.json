@@ -1,0 +1,17 @@
+[
+  { "pattern": "此时此刻", "replacement": "用具体时间标记替代（如：下午三点/下班高峰）", "category": "transition_formula", "severity": "warning", "layer": 1 },
+  { "pattern": "眼神中闪过", "replacement": "用微表情或动作替代（如：睫毛低垂/手指敲击桌面）", "category": "structure_closure", "severity": "medium", "layer": 2 },
+  { "pattern": "嘴角勾起一抹弧度", "replacement": "用具体笑容描写替代（如：嘴角扯了扯/露出半颗虎牙）", "category": "structure_closure", "severity": "medium", "layer": 2 },
+  { "pattern": "西装革履.*走来", "replacement": "用具体着装细节替代概括（如：领带松了/袖口磨损）", "category": "info_exposition", "severity": "low", "layer": 1 },
+  { "pattern": "会议室里.*沉默", "replacement": "用具体会议细节替代（如：投影仪嗡嗡声/有人转笔）", "category": "adverb_overuse", "severity": "warning", "layer": 1 },
+  { "pattern": "合同.*条款", "replacement": "用具体条款内容或谈判动作替代", "category": "info_exposition", "severity": "low", "layer": 1 },
+  { "pattern": "细节决定成败", "replacement": "用具体细节描写体现（如：他注意到对方拇指在抖）", "category": "summary_tendency", "severity": "medium", "layer": 2 },
+  { "pattern": "加班到深夜", "replacement": "用具体时间与环境替代（如：十一点，写字楼只剩保安）", "category": "transition_formula", "severity": "low", "layer": 1 },
+  { "pattern": "总裁.*办公室", "replacement": "用具体空间描写替代（如：落地窗正对江景/墙上挂着抽象画）", "category": "info_exposition", "severity": "low", "layer": 1 },
+  { "pattern": "豪车.*停下", "replacement": "用具体车型或停车细节替代（如：黑色轿车碾过水洼/尾灯闪了两下）", "category": "info_exposition", "severity": "low", "layer": 1 },
+  { "pattern": "咖啡.*端起", "replacement": "用具体动作与状态替代（如：纸杯已经凉了/杯底沉淀着糖渍）", "category": "adverb_overuse", "severity": "low", "layer": 1 },
+  { "pattern": "手机.*响起", "replacement": "用具体铃声或振动描写替代（如：屏幕在桌面上嗡嗡震动/来电显示是陌生号码）", "category": "transition_formula", "severity": "low", "layer": 1 },
+  { "pattern": "电梯.*打开", "replacement": "用具体电梯细节替代（如：楼层灯跳到17/镜面映出疲惫的脸）", "category": "transition_formula", "severity": "low", "layer": 1 },
+  { "pattern": " rain .*", "replacement": "用具体雨景描写替代（如：雨点砸在遮阳棚上噼啪作响/积水倒映着霓虹灯）", "category": "transition_formula", "severity": "low", "layer": 1 },
+  { "pattern": "窗外.*风景", "replacement": "用具体窗外景象替代（如：对面楼的灯光一盏盏熄灭/高架桥上堵着红色尾灯）", "category": "info_exposition", "severity": "low", "layer": 1 }
+]

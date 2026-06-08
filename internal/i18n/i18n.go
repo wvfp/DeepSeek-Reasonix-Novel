@@ -344,6 +344,22 @@ type Messages struct {
 
 	// usage / help
 	UsageBody string // full multi-line help text
+
+	// novel subcommand (网文专用)
+	DeprecationAliasWarning string // "warning: 'reasonix %s' is deprecated; use 'novel %s' instead"
+	NovelSubcommandUnknown   string // "unknown novel subcommand %q"
+	NovelProjectNotInit      string // "请先初始化小说项目，使用 novel init 工具"
+	NovelHelpChat            string // "interactive novel writing session"
+	NovelHelpChapter         string // "write a new chapter (or --continue the next one)"
+	NovelHelpArc             string // "manage story arcs and chapter outlines"
+	NovelHelpWorld           string // "manage worldbuilding entries"
+	NovelHelpCharacter       string // "manage characters and voice profiles"
+	NovelHelpReview          string // "8-dimension quality review of a chapter"
+	NovelHelpSetup           string // "initialise the .novel-weaver/ project in cwd"
+	NovelHelpStats           string // "writing statistics"
+	NovelHelpProgress        string // "writing progress summary"
+	NovelHelpDoctor          string // "diagnose the .novel-weaver/ project"
+	NovelHelpMigrate         string // "import a novel-plugin (.novel-weaver) project"
 }
 
 // ProviderStatusMessage returns an actionable explanation for a known provider

@@ -1,0 +1,17 @@
+[
+  { "pattern": "毫无预兆", "replacement": "用前兆细节替代（如：灯闪了一下/温度骤降）", "category": "transition_formula", "severity": "high", "layer": 3 },
+  { "pattern": "不知为何", "replacement": "用主角的主观感受替代（如：后颈发凉/想不起为什么进来）", "category": "emotion_tagging", "severity": "medium", "layer": 2 },
+  { "pattern": "一股寒意从脊背升起", "replacement": "用具体感官描写替代（如：后颈的汗毛一根根竖起来）", "category": "emotion_tagging", "severity": "medium", "layer": 2 },
+  { "pattern": "他感到", "replacement": "用身体反应直接展示（如：胃在抽搐/喉咙发紧）", "category": "emotion_tagging", "severity": "warning", "layer": 1 },
+  { "pattern": "她觉得", "replacement": "用身体反应直接展示（如：指尖发麻/呼吸变浅）", "category": "emotion_tagging", "severity": "warning", "layer": 1 },
+  { "pattern": "冷笑", "replacement": "用非人化笑声描写替代（如：笑声像是从牙缝里挤出来的）", "category": "dialog_formality", "severity": "high", "layer": 3 },
+  { "pattern": "一道黑影", "replacement": "用模糊的视觉残留替代（如：眼角有什么动了一下/再看时只有墙）", "category": "structure_closure", "severity": "high", "layer": 3 },
+  { "pattern": "规则.*第三条", "replacement": "用规则文本直接呈现，不加引导词", "category": "info_exposition", "severity": "low", "layer": 1 },
+  { "pattern": "日记.*记载", "replacement": "用日记原文片段替代概括", "category": "info_exposition", "severity": "medium", "layer": 2 },
+  { "pattern": "突然.*消失", "replacement": "用渐进式消失替代（如：轮廓先模糊，然后颜色褪去，最后连轮廓也不见了）", "category": "transition_formula", "severity": "high", "layer": 3 },
+  { "pattern": "镜子.*倒影", "replacement": "用具体镜像异常替代（如：镜中人眨了眼/倒影慢了半拍）", "category": "structure_closure", "severity": "high", "layer": 3 },
+  { "pattern": "门.*自己.*开", "replacement": "用具体开门细节替代（如：门轴发出吱呀声/门缝下漏出暗红的光）", "category": "transition_formula", "severity": "medium", "layer": 2 },
+  { "pattern": "电话.*铃声", "replacement": "用具体电话异常替代（如：老式转盘电话响了/来电显示是一串乱码）", "category": "transition_formula", "severity": "medium", "layer": 2 },
+  { "pattern": "走廊.*尽头", "replacement": "用具体走廊细节替代（如：声控灯一盏盏熄灭/尽头的消防栓在滴水）", "category": "info_exposition", "severity": "low", "layer": 1 },
+  { "pattern": "背后.*有人", "replacement": "用具体感知细节替代（如：呼出的气喷在后颈/影子比自己的多了一截）", "category": "emotion_tagging", "severity": "high", "layer": 3 }
+]

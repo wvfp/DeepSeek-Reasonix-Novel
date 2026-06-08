@@ -326,4 +326,20 @@ var Chinese = Messages{
   密钥通过 api_key_env 从环境变量注入（如 DEEPSEEK_API_KEY）。
   运行 'reasonix setup' 生成配置；详见 docs/SPEC.md。
 `,
+
+	// novel 子命令（网文专用）
+	DeprecationAliasWarning: "警告：'reasonix %s' 已弃用，请改用 'novel %s'",
+	NovelSubcommandUnknown:   "未知的 novel 子命令 %q",
+	NovelProjectNotInit:      "请先初始化小说项目，使用 novel init 工具",
+	NovelHelpChat:            "交互式小说写作会话",
+	NovelHelpChapter:         "写新章节（或用 --continue 续写下一章）",
+	NovelHelpArc:             "管理故事主线和章节大纲",
+	NovelHelpWorld:           "管理世界观条目",
+	NovelHelpCharacter:       "管理角色及声纹",
+	NovelHelpReview:          "对章节进行 8 维质量审查",
+	NovelHelpSetup:           "在当前目录初始化 .novel-weaver/ 项目",
+	NovelHelpStats:           "写作统计",
+	NovelHelpProgress:        "写作进度汇总",
+	NovelHelpDoctor:          "诊断 .novel-weaver/ 项目",
+	NovelHelpMigrate:         "导入 novel-plugin 的 .novel-weaver 项目",
 }

@@ -65,16 +65,65 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("openai: network: %w", err)
 	}
+	extraHeaders := parseExtraHeaders(cfg.Extra["extra_headers"])
 	return &client{
-		name:     name,
-		apiKey:   cfg.APIKey,
-		keyEnv:   keyEnv,
-		baseURL:  strings.TrimRight(cfg.BaseURL, "/"),
-		model:    cfg.Model,
-		deepseek: deepseek,
-		effort:   effort,
-		http:     httpClient,
+		name:         name,
+		apiKey:       cfg.APIKey,
+		keyEnv:       keyEnv,
+		baseURL:      strings.TrimRight(cfg.BaseURL, "/"),
+		model:        cfg.Model,
+		deepseek:     deepseek,
+		effort:       effort,
+		http:         httpClient,
+		extraHeaders: extraHeaders,
 	}, nil
+}
+
+// parseExtraHeaders accepts the values produced by both the TOML decoder (which
+// hands back map[string]any for inline tables) and pre-coerced map[string]string
+// maps from programmatic callers. Nil/empty inputs yield an empty map. Non-
+// string values are skipped silently — the resulting map may be smaller than
+// the source, which is fine for an attribution header that's either present or
+// not.
+func parseExtraHeaders(raw any) map[string]string {
+	if raw == nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case map[string]string:
+		if len(v) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(v))
+		for k, val := range v {
+			k = strings.TrimSpace(k)
+			val = strings.TrimSpace(val)
+			if k == "" || val == "" {
+				continue
+			}
+			out[k] = val
+		}
+		return out
+	case map[string]any:
+		if len(v) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(v))
+		for k, val := range v {
+			s, ok := val.(string)
+			if !ok {
+				continue
+			}
+			k = strings.TrimSpace(k)
+			s = strings.TrimSpace(s)
+			if k == "" || s == "" {
+				continue
+			}
+			out[k] = s
+		}
+		return out
+	}
+	return nil
 }
 
 func newHTTPClient(cfg provider.Config) (*http.Client, error) {
@@ -96,6 +145,11 @@ type client struct {
 	http     *http.Client
 	deepseek bool
 	effort   string // reasoning_effort forwarded to thinking-capable models; "" = omit
+	// extraHeaders are attached to every HTTP request verbatim (e.g. OpenCode
+	// Zen/OpenRouter attribution headers). Empty map = nothing extra. Read
+	// from cfg.Extra["extra_headers"]; the entry accepts both map[string]string
+	// and map[string]any values.
+	extraHeaders map[string]string
 }
 
 func (c *client) Name() string { return c.name }
@@ -136,6 +190,13 @@ func (c *client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 		httpReq.Header.Set("Accept", "text/event-stream")
+		// Attaching the caller's extra headers after the standard ones means
+		// they cannot override auth/content negotiation but can supply the
+		// attribution/affiliate pairs that gateways like OpenCode Zen and
+		// OpenRouter require (HTTP-Referer, X-Title, etc.).
+		for k, v := range c.extraHeaders {
+			httpReq.Header.Set(k, v)
+		}
 		return httpReq, nil
 	}
 	resp, err := provider.SendWithRetry(ctx, c.http, c.name, c.keyEnv, newReq)

@@ -30,6 +30,10 @@ import (
 	"reasonix/internal/lsp"
 	"reasonix/internal/memory"
 	"reasonix/internal/netclient"
+	"reasonix/internal/novel/novelbridge"
+	noveltools "reasonix/internal/novel/tools"
+	"reasonix/internal/novel/project"
+	"reasonix/internal/novel/roles"
 	"reasonix/internal/outputstyle"
 	"reasonix/internal/permission"
 	"reasonix/internal/plugin"
@@ -194,6 +198,40 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 	allSkills := skill.New(skill.Options{ProjectRoot: root, CustomPaths: cfg.SkillCustomPaths(), Stderr: io.Discard}).List()
 	sysPrompt = skill.ApplyIndex(sysPrompt, skills)
 
+	// Novel tools: when a .novel-weaver/ project exists at cwd, inject
+	// a tool index into the system prompt so the LLM knows these tools
+	// are available. The index is concise (names + one-line descriptions)
+	// to minimise per-turn token cost.
+	if _, statErr := os.Stat(filepath.Join(root, project.DefaultDirName)); statErr == nil {
+		sysPrompt += "\n\n## Novel Writing Tools\n\nYou have access to novel-writing tools. Use them to create and manage a web novel project. Key tools:\n\n"
+		sysPrompt += "- **novel_init**: Initialize a novel project (name, genre). Must be called first.\n"
+		sysPrompt += "- **novel_world_create**: Create a world/setting (name, description, type).\n"
+		sysPrompt += "- **novel_world_query**: Search worlds by keyword.\n"
+		sysPrompt += "- **novel_character_create**: Create a character (name, description, role_type).\n"
+		sysPrompt += "- **novel_character_query**: Search characters by keyword.\n"
+		sysPrompt += "- **novel_character_update**: Update character fields.\n"
+		sysPrompt += "- **novel_chapter_write**: Write a new chapter (title, outline, volume, chapter_num, genre).\n"
+		sysPrompt += "- **novel_chapter_continue**: Auto-continue writing the next chapter(s).\n"
+		sysPrompt += "- **novel_chapter_edit**: Edit an existing chapter (chapter_id, action, content).\n"
+		sysPrompt += "- **novel_chapter_review**: Review a chapter for quality (8 dimensions).\n"
+		sysPrompt += "- **novel_review_fix**: Auto-fix issues found in review.\n"
+		sysPrompt += "- **novel_consistency_check**: Check consistency across chapters.\n"
+		sysPrompt += "- **novel_arc_generate**: Generate a story arc/outline (title, level, parent_id).\n"
+		sysPrompt += "- **novel_arc_show**: Display the arc/outline tree.\n"
+		sysPrompt += "- **novel_arc_update**: Update arc fields.\n"
+		sysPrompt += "- **novel_pipeline_start**: Start the 4-phase pipeline (setting→planning→writing→reviewing).\n"
+		sysPrompt += "- **novel_pipeline_status**: Check current pipeline phase.\n"
+		sysPrompt += "- **novel_foreshadow_plant**: Plant a foreshadow/plot seed (description, keywords).\n"
+		sysPrompt += "- **novel_foreshadow_resolve**: Resolve a planted foreshadow.\n"
+		sysPrompt += "- **novel_foreshadow_list**: List foreshadows by status.\n"
+		sysPrompt += "- **novel_progress_track**: Track writing progress.\n"
+		sysPrompt += "- **novel_progress_summary**: Get a progress summary.\n"
+		sysPrompt += "- **novel_stats**: Get writing statistics.\n"
+		sysPrompt += "- **novel_query**: Smart search across all entities.\n"
+		sysPrompt += "- **novel_consistency_rules**: Manage custom consistency rules.\n"
+		sysPrompt += "\nAll tools require a `.novel-weaver/` project at cwd. If none exists, call `novel_init` first.\n"
+	}
+
 	reg := tool.NewRegistry()
 	bashSpec := sandbox.Spec{Mode: cfg.BashMode(), WriteRoots: cfg.WriteRootsForRoot(root), Network: cfg.Sandbox.Network}
 	if bashSpec.Mode == "enforce" && !sandbox.Available() {
@@ -204,6 +242,21 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 	}
 	searchSpec := builtin.ResolveSearch(cfg.Tools.Search.Engine, cfg.Tools.Search.RgPath, stderr)
 	addBuiltins(reg, cfg.Tools.Enabled, cfg.WriteRootsForRoot(root), bashSpec, searchSpec, stderr, root)
+
+	// Register novel tools so the LLM can discover and invoke them
+	// during chat sessions. The bridge adapts tools.Tool → tool.Tool.
+	novelReg := noveltools.NewRegistry()
+	novelbridge.SetManagerResolver(func() (*project.Manager, error) {
+		return noveltools.LoadCLIProject()
+	})
+	// Create Switcher for LLM-dependent tools if a provider is configured.
+	var sw *roles.Switcher
+	if execProv != nil {
+		caller := &noveltools.ProviderLLMCaller{Provider: execProv}
+		noveltools.SetDefaultLLMCaller(caller)
+		sw, _ = roles.NewSwitcher(caller, "")
+	}
+	novelbridge.RegisterAll(reg, novelReg, sw)
 	// Always construct a host, even with no plugins configured, so the controller's
 	// host pointer is stable for the session and `/mcp add` can hot-add into it.
 	pluginHost := plugin.NewHost()
@@ -660,10 +713,11 @@ func NewProviderWithProxy(e *config.ProviderEntry, proxy netclient.ProxySpec) (p
 		// provider-kind-specific knobs (the anthropic provider reads thinking/effort;
 		// the openai one ignores them).
 		Extra: map[string]any{
-			"api_key_env": e.APIKeyEnv,
-			"thinking":    e.Thinking,
-			"effort":      e.Effort,
-			"proxy_spec":  proxy,
+			"api_key_env":   e.APIKeyEnv,
+			"thinking":      e.Thinking,
+			"effort":        e.Effort,
+			"proxy_spec":    proxy,
+			"extra_headers": e.ExtraHeaders,
 		},
 	})
 }

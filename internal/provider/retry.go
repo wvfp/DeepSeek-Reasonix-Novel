@@ -98,7 +98,13 @@ func IsConnReset(err error) bool {
 		return true
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr)
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if strings.Contains(err.Error(), "http2:") {
+		return true
+	}
+	return false
 }
 
 func backoffDelay(attempt int, retryAfter time.Duration) time.Duration {

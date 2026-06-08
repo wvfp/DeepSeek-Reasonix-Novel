@@ -1,0 +1,17 @@
+[
+  { "pattern": "一股强大的气势", "replacement": "用具体境界差异描写替代（如：金丹威压让筑基修士喘不过气）", "category": "structure_closure", "severity": "high", "layer": 3 },
+  { "pattern": "眼神一凛", "replacement": "用具体行动体现警觉（如：手指扣上剑诀/袖中符箓微亮）", "category": "structure_closure", "severity": "medium", "layer": 2 },
+  { "pattern": "陡然", "replacement": "用灵气波动或环境异变暗示突变", "category": "transition_formula", "severity": "medium", "layer": 2 },
+  { "pattern": "转瞬即逝", "replacement": "用具体的时间感描写替代（如：一息之间/半盏茶工夫）", "category": "transition_formula", "severity": "medium", "layer": 2 },
+  { "pattern": "宛如", "replacement": "用修真体系内的类比替代（如：如同金丹自爆般的冲击）", "category": "transition_formula", "severity": "warning", "layer": 1 },
+  { "pattern": "冷笑一声", "replacement": "用微表情+杀意描写替代（如：嘴角抽动，眼底却无笑意）", "category": "dialog_formality", "severity": "medium", "layer": 2 },
+  { "pattern": "不由得", "replacement": "用境界压制或心魔影响解释被动行为", "category": "adverb_overuse", "severity": "warning", "layer": 1 },
+  { "pattern": "灵根.*觉醒", "replacement": "用具体灵根表现替代概括（如：木灵根让周围草木疯长）", "category": "info_exposition", "severity": "high", "layer": 4 },
+  { "pattern": "突破.*境界", "replacement": "用突破时的具体异象描写替代（如雷劫/心魔/灵气漩涡）", "category": "info_exposition", "severity": "medium", "layer": 2 },
+  { "pattern": "天材地宝", "replacement": "用具体灵草/矿石名称替代（如：九叶剑草/玄阴寒铁）", "category": "info_exposition", "severity": "medium", "layer": 2 },
+  { "pattern": "功法.*运转", "replacement": "用具体功法效果替代（如：经脉中热流奔涌/丹田气旋加速）", "category": "info_exposition", "severity": "medium", "layer": 2 },
+  { "pattern": "修为.*精进", "replacement": "用具体修炼表现替代（如：神识范围扩大/法诀威力提升）", "category": "info_exposition", "severity": "medium", "layer": 2 },
+  { "pattern": "法宝.*祭出", "replacement": "用具体法宝形态与效果替代（如：青铜小镜飞出，镜面泛起涟漪）", "category": "info_exposition", "severity": "medium", "layer": 2 },
+  { "pattern": "空间.*扭曲", "replacement": "用具体空间异象替代（如：景物如水中倒影晃动/脚下石板错位）", "category": "structure_closure", "severity": "high", "layer": 3 },
+  { "pattern": "大道.*感悟", "replacement": "用具体悟道场景替代（如：脑海中浮现星河倒悬/耳畔响起远古钟鸣）", "category": "info_exposition", "severity": "high", "layer": 4 }
+]

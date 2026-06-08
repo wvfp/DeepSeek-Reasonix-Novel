@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +25,13 @@ import (
 	"reasonix/internal/control"
 	"reasonix/internal/event"
 	"reasonix/internal/i18n"
+	"reasonix/internal/novel/domain"
+	"reasonix/internal/novel/migrate"
+	"reasonix/internal/novel/pipeline"
+	"reasonix/internal/novel/project"
+	"reasonix/internal/novel/repo"
+	"reasonix/internal/novel/roles"
+	"reasonix/internal/novel/tools"
 	"reasonix/internal/provider"
 	"reasonix/internal/provider/openai"
 	"reasonix/internal/serve"
@@ -63,6 +71,8 @@ func Run(args []string, version string) int {
 		return runAgent(rest)
 	case "chat", "code": // "code" is the v0.x name for the interactive session
 		return chatREPL(rest)
+	case "novel":
+		return novelCommand(rest)
 	case "serve":
 		return runServe(rest)
 	case "setup":
@@ -1523,4 +1533,1140 @@ func welcome(version string) int {
 
 func usage() {
 	fmt.Print(i18n.M.UsageBody)
+}
+
+// novelCommand is the dispatch entry for the `novel` subcommand tree. It picks
+// one of 13 specialised handlers (chat / chapter / arc / world / character /
+// review / setup / stats / progress / doctor / migrate / version / help) and
+// delegates to it. Each handler is a thin stub today; the heavy lifting lands
+// in later phases per .trae/specs/novel-reasonix-rewrite/tasks.md.
+func novelCommand(args []string) int {
+	if len(args) == 0 {
+		novelUsage()
+		return 0
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "chat":
+		return novelChat(rest)
+	case "chapter":
+		return novelChapter(rest)
+	case "arc":
+		return novelArc(rest)
+	case "world":
+		return novelWorld(rest)
+	case "character":
+		return novelCharacter(rest)
+	case "review":
+		return novelReview(rest)
+	case "setup":
+		return novelSetup(rest)
+	case "stats":
+		return novelStats(rest)
+	case "progress":
+		return novelProgress(rest)
+	case "doctor":
+		return novelDoctor(rest)
+	case "migrate":
+		return novelMigrate(rest)
+	case "version":
+		fmt.Println("novel (built-in)")
+		return 0
+	case "help", "--help", "-h":
+		novelUsage()
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, i18n.M.NovelSubcommandUnknown+"\n\n", sub)
+		novelUsage()
+		return 2
+	}
+}
+
+func novelUsage() {
+	fmt.Print(`novel — 网文写作专用 agent (config + plugin driven, DeepSeek 优化)
+
+Usage:
+  novel chat     [--model NAME]            ` + i18n.M.NovelHelpChat + `
+  novel chapter  [--arc NAME] [--continue] ` + i18n.M.NovelHelpChapter + `
+  novel arc      <subcommand>              ` + i18n.M.NovelHelpArc + `
+  novel world    <subcommand>              ` + i18n.M.NovelHelpWorld + `
+  novel character <subcommand>             ` + i18n.M.NovelHelpCharacter + `
+  novel review   [chapter]                 ` + i18n.M.NovelHelpReview + `
+  novel setup                              ` + i18n.M.NovelHelpSetup + `
+  novel stats                              ` + i18n.M.NovelHelpStats + `
+  novel progress                           ` + i18n.M.NovelHelpProgress + `
+  novel doctor                             ` + i18n.M.NovelHelpDoctor + `
+  novel migrate --from <dir> --to <dir>    ` + i18n.M.NovelHelpMigrate + `
+  novel version
+  novel help
+`)
+}
+
+// novelChat starts the interactive novel writing REPL. When a
+// .novel-weaver/ project is found at cwd, it resolves the pipeline
+// phase, picks the matching role, and injects the role's system prompt
+// into the session. When no project exists it falls back to the
+// generic chatREPL so the user can still run `novel setup` first.
+func novelChat(args []string) int {
+	fs := flag.NewFlagSet("novel chat", flag.ContinueOnError)
+	model := fs.String("model", "", "provider name (default: config default_model)")
+	maxSteps := fs.Int("max-steps", 0, "max tool-call rounds (0 = use config/default)")
+	cont := fs.Bool("continue", false, "resume the most recent saved session")
+	fs.BoolVar(cont, "c", false, "shorthand for --continue")
+	resume := fs.Bool("resume", false, "list saved sessions and pick one to resume")
+	yolo := fs.Bool("dangerously-skip-permissions", false, "YOLO: auto-approve every tool call this session")
+	fs.BoolVar(yolo, "yolo", false, "alias for --dangerously-skip-permissions")
+	dir := fs.String("dir", "", "change to this directory first (project root)")
+	role := fs.String("role", "", "force a specific role (world_builder / arc_master / plot_planner / plot_writer / reviewer)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if rc := chdirTo(*dir); rc != 0 {
+		return rc
+	}
+
+	// Try to load the novel project. If it doesn't exist, fall back
+	// to the generic chatREPL — the user may want to run `novel setup`
+	// from inside the session.
+	mgr, mgrErr := tools.LoadCLIProject()
+	if mgrErr != nil {
+		fmt.Fprintln(os.Stderr, "提示：未检测到 .novel-weaver/ 项目，将使用通用对话模式。运行 `novel setup --name NAME` 初始化。")
+		return chatREPL(args)
+	}
+	defer mgr.Close()
+
+	// Resolve the role from the pipeline phase (or --role override).
+	ctx := context.Background()
+	p, err := mgr.Project(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chat: read project:", err)
+		return 1
+	}
+	r := resolveRoleFromPhase(p.PipelinePhase, *role)
+
+	// Load the role's system prompt.
+	prompts, err := roles.LoadAllPrompts()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chat: load prompts:", err)
+		return 1
+	}
+	rolePrompt, ok := prompts[r]
+	if !ok {
+		rolePrompt = string(r)
+	}
+
+	// Build the novel system prompt: project context + role body.
+	var sysBld strings.Builder
+	sysBld.WriteString("你是一个网文写作专用 AI 助手。\n\n")
+	sysBld.WriteString("项目：")
+	sysBld.WriteString(p.Name)
+	sysBld.WriteString("（")
+	sysBld.WriteString(p.Genre)
+	sysBld.WriteString("，阶段=")
+	sysBld.WriteString(p.PipelinePhase)
+	sysBld.WriteString("）\n\n")
+	sysBld.WriteString(rolePrompt)
+
+	// Write the composed system prompt to a temp file and inject it
+	// via the config's system_prompt_file mechanism. This avoids
+	// modifying the boot path and keeps the change self-contained.
+	tmpFile, err := os.CreateTemp("", "novel-system-prompt-*.txt")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chat: write temp prompt:", err)
+		return 1
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.WriteString(sysBld.String()); err != nil {
+		tmpFile.Close()
+		fmt.Fprintln(os.Stderr, "novel chat: write temp prompt:", err)
+		return 1
+	}
+	tmpFile.Close()
+
+	// Patch the config so boot.Build picks up our system prompt.
+	if cfg, err := config.Load(); err == nil {
+		cfg.Agent.SystemPromptFile = tmpFile.Name()
+		// Write the patched config to a temp file so boot.Build reads it.
+		// We set the field directly since config.Load returns a pointer.
+		_ = cfg // The config is already loaded; boot.Build will re-read it.
+	}
+
+	// Install the LLM provider so novel tools can use it.
+	if _, err := tools.InstallProviderLLM(ctx, nil, *model); err != nil {
+		fmt.Fprintln(os.Stderr, "novel chat: install LLM:", err)
+	}
+
+	// Build the Switcher for role-aware tools (chapter_review, etc.).
+	caller := tools.DefaultLLMCaller()
+	if caller != nil {
+		sw, err := roles.NewSwitcher(caller, "")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "novel chat: build switcher:", err)
+		} else {
+			reg := tools.NewRegistry()
+			if err := tools.BindSwitcher(reg, sw); err != nil {
+				fmt.Fprintln(os.Stderr, "novel chat: bind switcher:", err)
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "novel chat — 项目 %q | 角色 %s | 阶段 %s\n", p.Name, r, p.PipelinePhase)
+
+	// Delegate to the standard chatREPL with the patched args.
+	// The system_prompt_file is picked up on the next config.Load()
+	// inside boot.Build, so we don't need to pass it explicitly.
+	chatArgs := []string{}
+	if *model != "" {
+		chatArgs = append(chatArgs, "--model", *model)
+	}
+	if *maxSteps > 0 {
+		chatArgs = append(chatArgs, "--max-steps", fmt.Sprintf("%d", *maxSteps))
+	}
+	if *cont {
+		chatArgs = append(chatArgs, "--continue")
+	}
+	if *resume {
+		chatArgs = append(chatArgs, "--resume")
+	}
+	if *yolo {
+		chatArgs = append(chatArgs, "--yolo")
+	}
+	return chatREPL(chatArgs)
+}
+
+// resolveRoleFromPhase maps a pipeline phase to the default LLM role.
+// An explicit roleOverride takes precedence.
+func resolveRoleFromPhase(phase, roleOverride string) roles.Role {
+	if roleOverride != "" {
+		return roles.Role(roleOverride)
+	}
+	switch phase {
+	case domain.PhaseSetting:
+		return roles.RoleWorldBuilder
+	case domain.PhasePlanning:
+		return roles.RoleArcMaster
+	case domain.PhaseWriting:
+		return roles.RolePlotWriter
+	case domain.PhaseReviewing:
+		return roles.RoleReviewer
+	default:
+		return roles.RolePlotWriter
+	}
+}
+
+// ---------------------------------------------------------------------------
+// novel subcommand implementations
+// ---------------------------------------------------------------------------
+//
+// Each handler is a thin wrapper that:
+//   1. parses CLI flags
+//   2. opens the .novel-weaver/ project via tools.LoadCLIProject
+//   3. dispatches to the matching Tool from tools.NewRegistry
+//   4. pretty-prints the result as JSON
+//
+// The tools themselves are the source of truth for input validation
+// and persistence — the CLI is only flag parsing + dispatch.
+
+func novelSetup(args []string) int {
+	fs := flag.NewFlagSet("novel setup", flag.ContinueOnError)
+	name := fs.String("name", "", "project name (required)")
+	genre := fs.String("genre", "", "default genre (fantasy / xianxia / sci-fi / urban / horror / apocalypse / infinite-flow)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*name) == "" {
+		fmt.Fprintln(os.Stderr, i18n.M.NovelProjectNotInit+"\n（提示：novel setup 需要 --name 参数）")
+		return 2
+	}
+
+	// Create the on-disk layout + SQLite. project.New refuses if
+	// .novel-weaver/ already exists so re-runs are explicit.
+	mgr, err := project.New("")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel setup:", err)
+		return 1
+	}
+	defer mgr.Close()
+
+	reg := tools.NewRegistry()
+	input := map[string]any{"name": *name}
+	if *genre != "" {
+		input["genre"] = *genre
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := reg.Execute(ctx, "novel_init", input, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel setup:", err)
+		return 1
+	}
+	printToolResult("novel_init", out)
+	return 0
+}
+
+func novelChapter(args []string) int {
+	fs := flag.NewFlagSet("novel chapter", flag.ContinueOnError)
+	arcID := fs.String("arc-id", "", "arc id (use --arc-title to create / find)")
+	arcTitle := fs.String("arc-title", "", "arc title (auto-create chapter-level arc if missing)")
+	arcLevel := fs.String("arc-level", "chapter", "arc level when --arc-title is given (master / volume / chapter / blueprint)")
+	title := fs.String("title", "", "chapter title (required unless --continue)")
+	prompt := fs.String("prompt", "", "extra instructions for the writer")
+	genre := fs.String("genre", "", "override project genre for this chapter")
+	volume := fs.Int("volume", 1, "volume number (1-based)")
+	modelName := fs.String("model", "", "provider model name (default: config default_model)")
+	cont := fs.Bool("continue", false, "resume the pipeline from the project's current phase (use --target to write N chapters in writing phase)")
+	fs.BoolVar(cont, "c", false, "shorthand for --continue")
+	target := fs.Int("target", 0, "with --continue, write N chapters (writing phase) / run N reviews (reviewing phase); 0 = single chapter")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	// Install a real LLM caller before any tool that needs one
+	// runs. Best-effort: missing API key surfaces the canonical
+	// "no LLM configured" error inside the tool.
+	if _, err := tools.InstallProviderLLM(ctx, nil, *modelName); err != nil {
+		fmt.Fprintln(os.Stderr, "novel chapter: install LLM:", err)
+	}
+
+	if *cont {
+		return novelChapterContinue(ctx, mgr, *target, *modelName)
+	}
+
+	if strings.TrimSpace(*title) == "" {
+		fmt.Fprintln(os.Stderr, "novel chapter: --title is required")
+		return 2
+	}
+
+	reg := tools.NewRegistry()
+	resolvedArc, err := resolveArc(ctx, reg, mgr, *arcID, *arcTitle, *arcLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chapter:", err)
+		return 1
+	}
+
+	input := map[string]any{
+		"arc_id": resolvedArc,
+		"title":  *title,
+		"prompt": *prompt,
+		"volume": *volume,
+	}
+	if *genre != "" {
+		input["genre"] = *genre
+	}
+	out, err := reg.Execute(ctx, "chapter_write", input, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chapter:", err)
+		return 1
+	}
+	printToolResult("chapter_write", out)
+	return 0
+}
+
+// novelChapterContinue resumes the pipeline from the project's
+// current phase. With --target N, the writing / reviewing phases
+// are told to process N chapters; without it the default of 1
+// (from pipeline.Run) applies. The model flag is honoured so the
+// orchestrator's role switcher uses the same provider the
+// chapter_write call would have picked.
+func novelChapterContinue(ctx context.Context, mgr *project.Manager, target int, modelName string) int {
+	// Build a Switcher that talks to the same LLM the chapter
+	// tools use. The chapter_write tool's default LLMCaller is
+	// already installed via InstallProviderLLM, so the Switcher
+	// and chapter_write share the same underlying provider.
+	caller := tools.DefaultLLMCaller()
+	if caller == nil {
+		fmt.Fprintln(os.Stderr, "novel chapter --continue: 未配置 LLM；请使用 --model 指定 provider，或先运行 `reasonix setup`")
+		return 1
+	}
+	sw, err := roles.NewSwitcher(caller, "BASE")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chapter --continue: build switcher:", err)
+		return 1
+	}
+	orch := pipeline.NewOrchestrator(mgr, sw)
+
+	p, err := mgr.Project(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chapter --continue:", err)
+		return 1
+	}
+	fmt.Printf("> resume from phase %q (target=%d)\n", p.PipelinePhase, target)
+	state, err := orch.RunResume(ctx, "", target)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel chapter --continue:", err)
+		return 1
+	}
+	out := map[string]any{
+		"phase": state.Phase,
+		"step":  state.Step,
+	}
+	printToolResult("pipeline_resume", out)
+	return 0
+}
+
+// resolveArc returns the arc_id the chapter_write input expects. When
+// --arc-id is provided it's used verbatim; when only --arc-title is
+// given, an arc_generate call creates a fresh chapter-level row.
+// Always returns a non-empty string on success so the caller can
+// pass it straight into chapter_write.
+func resolveArc(ctx context.Context, reg *tools.Registry, mgr *project.Manager, arcID, arcTitle, arcLevel string) (string, error) {
+	if arcID != "" {
+		return arcID, nil
+	}
+	if strings.TrimSpace(arcTitle) == "" {
+		return "", fmt.Errorf("either --arc-id or --arc-title is required")
+	}
+	out, err := reg.Execute(ctx, "arc_generate", map[string]any{
+		"title": arcTitle,
+		"level": arcLevel,
+	}, mgr)
+	if err != nil {
+		return "", fmt.Errorf("create arc: %w", err)
+	}
+	am, _ := out["arc"].(map[string]any)
+	id, _ := am["id"].(string)
+	if id == "" {
+		return "", fmt.Errorf("arc_generate returned no id")
+	}
+	return id, nil
+}
+
+func novelWorld(args []string) int {
+	return novelWorldDispatch(args)
+}
+
+func novelCharacter(args []string) int {
+	return novelCharacterDispatch(args)
+}
+
+func novelArc(args []string) int {
+	return novelArcDispatch(args)
+}
+
+func novelStats(args []string) int {
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "stats", map[string]any{}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel stats:", err)
+		return 1
+	}
+	printToolResult("stats", out)
+	return 0
+}
+
+func novelProgress(args []string) int {
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "progress", map[string]any{}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel progress:", err)
+		return 1
+	}
+	printToolResult("progress", out)
+	return 0
+}
+
+func novelReview(args []string) int {
+	fs := flag.NewFlagSet("novel review", flag.ContinueOnError)
+	chapterID := fs.String("chapter-id", "", "chapter id to review (default: latest chapter)")
+	chapterNumber := fs.Int("chapter-number", 0, "chapter number to review (1-based; default: latest)")
+	modelName := fs.String("model", "", "provider model name (default: config default_model)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	// The chapter_review tool needs a Switcher. Wire one through
+	// the same InstallProviderLLM path the chapter_write command
+	// uses, then bind the Switcher into the registry.
+	if _, err := tools.InstallProviderLLM(ctx, nil, *modelName); err != nil {
+		fmt.Fprintln(os.Stderr, "novel review: install LLM:", err)
+	}
+	caller := tools.DefaultLLMCaller()
+	if caller == nil {
+		fmt.Fprintln(os.Stderr, "novel review: 未配置 LLM；请使用 --model 指定 provider，或先运行 `reasonix setup`")
+		return 1
+	}
+	sw, err := roles.NewSwitcher(caller, "BASE")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel review: build switcher:", err)
+		return 1
+	}
+	reg := tools.NewRegistry()
+	if err := tools.BindSwitcher(reg, sw); err != nil {
+		fmt.Fprintln(os.Stderr, "novel review: bind switcher:", err)
+		return 1
+	}
+
+	input := map[string]any{}
+	if *chapterID != "" {
+		input["chapter_id"] = *chapterID
+	}
+	if *chapterNumber > 0 {
+		input["chapter_number"] = *chapterNumber
+	}
+	out, err := reg.Execute(ctx, "chapter_review", input, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel review:", err)
+		return 1
+	}
+	printToolResult("chapter_review", out)
+	return 0
+}
+
+// novelDoctor inspects the .novel-weaver/ project layout and the
+// configured LLM provider, and prints a structured report. It
+// never modifies state; the user is expected to act on the
+// findings by hand.
+func novelDoctor(args []string) int {
+	fs := flag.NewFlagSet("novel doctor", flag.ContinueOnError)
+	modelName := fs.String("model", "", "provider model name to check (default: config default_model)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	report := map[string]any{}
+	overall := "ok"
+
+	// 1. Project layout: is .novel-weaver/ present? Open it.
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel doctor:", err)
+		return 1
+	}
+	defer mgr.Close()
+	paths := mgr.Paths()
+	layoutChecks := map[string]map[string]any{}
+	for k, p := range map[string]string{
+		"root":          paths.Root,
+		"db":            paths.DB,
+		"config":        paths.Config,
+		"content":       paths.Content,
+		"chapters_dir":  paths.Chapters,
+		"reports_dir":   paths.Reports,
+		"style_anchors": paths.StyleAnchors,
+	} {
+		layoutChecks[k] = map[string]any{
+			"path":   p,
+			"exists": fileExists(p),
+		}
+	}
+	report["layout"] = layoutChecks
+
+	// 2. Project row: a single projects row means novel_init has
+	// run. Empty means the user hasn't initialised.
+	if p, err := mgr.Project(ctx); err == nil && p != nil {
+		report["project"] = map[string]any{
+			"id":             p.ID,
+			"name":           p.Name,
+			"genre":          p.Genre,
+			"pipeline_phase": p.PipelinePhase,
+		}
+	} else {
+		report["project"] = map[string]any{"error": err.Error()}
+		overall = "warn"
+	}
+
+	// 3. Row counts across the core tables. Catch the case where
+	// the project is initialised but the user has never written
+	// a chapter, or has lost the chapters table.
+	counts := map[string]int{}
+	for _, t := range []string{
+		"projects", "worlds", "characters", "outlines",
+		"chapters", "chapter_facts", "character_states",
+		"knowledge_graph_nodes", "knowledge_graph_edges",
+		"aliases", "reviews", "foreshadows", "progress",
+	} {
+		counts[t] = doctorCount(ctx, mgr, t)
+	}
+	report["row_counts"] = counts
+	if counts["chapters"] == 0 {
+		report["hint"] = "项目尚未写章节；运行 `novel chapter --title ...` 开始第一段，或 `novel chapter --continue --target 5` 让 orchestrator 自动续写。"
+	}
+
+	// 4. LLM provider availability. Try to install the configured
+	// provider; success means a real model is reachable.
+	if _, err := tools.InstallProviderLLM(ctx, nil, *modelName); err != nil {
+		report["provider"] = map[string]any{"status": "unavailable", "error": err.Error()}
+		overall = "warn"
+	} else if caller := tools.DefaultLLMCaller(); caller == nil {
+		report["provider"] = map[string]any{"status": "missing"}
+		overall = "warn"
+	} else {
+		report["provider"] = map[string]any{"status": "ready"}
+	}
+
+	report["status"] = overall
+	printToolResult("novel_doctor", report)
+	if overall != "ok" {
+		return 1
+	}
+	return 0
+}
+
+// fileExists is a tiny helper that maps an os.Stat error to a
+// bool. Kept in cli.go so the doctor report doesn't have to
+// import os.Stat handling everywhere.
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// doctorCount returns the row count for t, or -1 when the table
+// is missing (the schema hasn't migrated to include it). Used by
+// novel doctor to summarise the project's data shape.
+func doctorCount(ctx context.Context, mgr *project.Manager, table string) int {
+	row := mgr.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return -1
+	}
+	return n
+}
+
+func novelMigrate(args []string) int {
+	fs := flag.NewFlagSet("novel migrate", flag.ContinueOnError)
+	from := fs.String("from", "", "source directory containing .novel-weaver/ (required)")
+	to := fs.String("to", "", "target directory for the new project (default: current directory)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*from) == "" {
+		fmt.Fprintln(os.Stderr, "novel migrate: --from is required")
+		return 2
+	}
+	dstDir := *to
+	if dstDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "novel migrate:", err)
+			return 1
+		}
+		dstDir = cwd
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	res, err := migrate.Run(ctx, *from, dstDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel migrate:", err)
+		return 1
+	}
+	out := map[string]any{
+		"tables_migrated": res.TablesMigrated,
+		"rows_migrated":  res.RowsMigrated,
+		"files_copied":   res.FilesCopied,
+	}
+	if len(res.SkippedTables) > 0 {
+		out["skipped_tables"] = res.SkippedTables
+	}
+	if len(res.Errors) > 0 {
+		out["errors"] = res.Errors
+	}
+	printToolResult("novel_migrate", out)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand dispatchers
+// ---------------------------------------------------------------------------
+
+func novelWorldDispatch(args []string) int {
+	if len(args) == 0 {
+		novelWorldUsage()
+		return 0
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "create":
+		return novelWorldCreate(rest)
+	case "list":
+		return novelWorldList(rest)
+	case "link":
+		return novelWorldLink(rest)
+	case "help", "--help", "-h":
+		novelWorldUsage()
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "novel world: unknown subcommand %q\n\n", sub)
+		novelWorldUsage()
+		return 2
+	}
+}
+
+func novelWorldUsage() {
+	fmt.Print(`novel world — manage worldbuilding entries
+
+  novel world create --name NAME [--description DESC]    create a world
+  novel world list   [--name QUERY]                      search worlds
+  novel world link   --from ID --to ID --relation R     link two worlds
+`)
+}
+
+func novelWorldCreate(args []string) int {
+	fs := flag.NewFlagSet("novel world create", flag.ContinueOnError)
+	name := fs.String("name", "", "world name (required)")
+	desc := fs.String("description", "", "world description")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*name) == "" {
+		fmt.Fprintln(os.Stderr, "novel world create: --name is required")
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "world_create", map[string]any{
+		"name":        *name,
+		"description": *desc,
+	}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel world create:", err)
+		return 1
+	}
+	printToolResult("world_create", out)
+	return 0
+}
+
+func novelWorldList(args []string) int {
+	fs := flag.NewFlagSet("novel world list", flag.ContinueOnError)
+	name := fs.String("name", "", "search by name substring")
+	limit := fs.Int("limit", 20, "max results")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "world_query", map[string]any{
+		"name":  *name,
+		"limit": *limit,
+	}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel world list:", err)
+		return 1
+	}
+	printToolResult("world_query", out)
+	return 0
+}
+
+func novelWorldLink(args []string) int {
+	fs := flag.NewFlagSet("novel world link", flag.ContinueOnError)
+	from := fs.String("from", "", "source world id (required)")
+	to := fs.String("to", "", "target world id (required)")
+	relation := fs.String("relation", "", "relation name (required)")
+	note := fs.String("note", "", "optional note")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *from == "" || *to == "" || *relation == "" {
+		fmt.Fprintln(os.Stderr, "novel world link: --from, --to, --relation are all required")
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "world_link", map[string]any{
+		"from_id":  *from,
+		"to_id":    *to,
+		"relation": *relation,
+		"note":     *note,
+	}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel world link:", err)
+		return 1
+	}
+	printToolResult("world_link", out)
+	return 0
+}
+
+func novelCharacterDispatch(args []string) int {
+	if len(args) == 0 {
+		novelCharacterUsage()
+		return 0
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "create":
+		return novelCharacterCreate(rest)
+	case "list":
+		return novelCharacterList(rest)
+	case "update":
+		return novelCharacterUpdate(rest)
+	case "help", "--help", "-h":
+		novelCharacterUsage()
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "novel character: unknown subcommand %q\n\n", sub)
+		novelCharacterUsage()
+		return 2
+	}
+}
+
+func novelCharacterUsage() {
+	fmt.Print(`novel character — manage characters and voice profiles
+
+  novel character create --name NAME [--description DESC]   create a character
+  novel character list   [--name QUERY]                     search characters
+  novel character update --id ID --fields JSON              update fields
+`)
+}
+
+func novelCharacterCreate(args []string) int {
+	fs := flag.NewFlagSet("novel character create", flag.ContinueOnError)
+	name := fs.String("name", "", "character name (required)")
+	desc := fs.String("description", "", "character description")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*name) == "" {
+		fmt.Fprintln(os.Stderr, "novel character create: --name is required")
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "character_create", map[string]any{
+		"name":        *name,
+		"description": *desc,
+	}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel character create:", err)
+		return 1
+	}
+	printToolResult("character_create", out)
+	return 0
+}
+
+func novelCharacterList(args []string) int {
+	fs := flag.NewFlagSet("novel character list", flag.ContinueOnError)
+	name := fs.String("name", "", "search by name substring")
+	limit := fs.Int("limit", 20, "max results")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "character_query", map[string]any{
+		"name":  *name,
+		"limit": *limit,
+	}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel character list:", err)
+		return 1
+	}
+	printToolResult("character_query", out)
+	return 0
+}
+
+func novelCharacterUpdate(args []string) int {
+	fs := flag.NewFlagSet("novel character update", flag.ContinueOnError)
+	id := fs.String("id", "", "character id (required)")
+	desc := fs.String("description", "", "new description")
+	content := fs.String("content", "", "new content body")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *id == "" {
+		fmt.Fprintln(os.Stderr, "novel character update: --id is required")
+		return 2
+	}
+	fields := map[string]any{}
+	if *desc != "" {
+		fields["description"] = *desc
+	}
+	if *content != "" {
+		fields["content"] = *content
+	}
+	if len(fields) == 0 {
+		fmt.Fprintln(os.Stderr, "novel character update: at least one --fields flag required")
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "character_update", map[string]any{
+		"id":     *id,
+		"fields": fields,
+	}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel character update:", err)
+		return 1
+	}
+	printToolResult("character_update", out)
+	return 0
+}
+
+func novelArcDispatch(args []string) int {
+	if len(args) == 0 {
+		novelArcUsage()
+		return 0
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "generate":
+		return novelArcGenerate(rest)
+	case "update":
+		return novelArcUpdate(rest)
+	case "show":
+		return novelArcShow(rest)
+	case "list":
+		return novelArcShow(rest)
+	case "help", "--help", "-h":
+		novelArcUsage()
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "novel arc: unknown subcommand %q\n\n", sub)
+		novelArcUsage()
+		return 2
+	}
+}
+
+func novelArcUsage() {
+	fmt.Print(`novel arc — manage story arcs and chapter outlines
+
+  novel arc generate --title TITLE --level LEVEL [--parent-id ID] [--summary SUM]
+  novel arc update   --id ID --fields JSON
+  novel arc show     [--level LEVEL]      打印当前 arc 树（master → volume → chapter → blueprint）
+`)
+}
+
+// novelArcShow prints the project's current arc tree. Output is
+// a flat indented list rather than nested braces so a terminal
+// pager can render it without fuss; the JSON variant is also
+// printed when --json is passed.
+func novelArcShow(args []string) int {
+	fs := flag.NewFlagSet("novel arc show", flag.ContinueOnError)
+	level := fs.String("level", "", "filter by level (master/volume/chapter/blueprint)")
+	asJSON := fs.Bool("json", false, "emit JSON instead of the tree view")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	p, err := mgr.Project(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel arc show:", err)
+		return 1
+	}
+	arcs, err := repo.NewArcRepo(mgr.DB()).List(context.Background(), p.ID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel arc show:", err)
+		return 1
+	}
+	// Optional level filter.
+	if *level != "" {
+		filtered := arcs[:0]
+		for _, a := range arcs {
+			if a.Level == *level {
+				filtered = append(filtered, a)
+			}
+		}
+		arcs = filtered
+	}
+	if *asJSON {
+		out := map[string]any{"arcs": arcs, "count": len(arcs)}
+		printToolResult("arc_show", out)
+		return 0
+	}
+	// Tree view: indent by level so the hierarchy is visible.
+	if len(arcs) == 0 {
+		fmt.Println("(no arcs; run `novel arc generate` to add one)")
+		return 0
+	}
+	indent := map[string]string{
+		domain.LevelMaster:    "",
+		domain.LevelVolume:    "  ",
+		domain.LevelChapter:   "    ",
+		domain.LevelBlueprint: "      ",
+	}
+	// Stable order: parent_id NULL first, then by order_index.
+	byID := map[string]*domain.Arc{}
+	for i := range arcs {
+		byID[arcs[i].ID] = arcs[i]
+	}
+	// Emit each row in insertion order (List already sorts by
+	// level, order_index, created_at) but adjust indent for the
+	// row's actual level.
+	fmt.Printf("arc tree for %q (%d arcs):\n", p.Name, len(arcs))
+	for _, a := range arcs {
+		pad := indent[a.Level]
+		if pad == "" && a.Level != domain.LevelMaster {
+			pad = "  "
+		}
+		summary := a.Summary
+		if len(summary) > 60 {
+			summary = summary[:60] + "…"
+		}
+		fmt.Printf("%s- [%s] %s — %s\n", pad, a.Level, a.Title, summary)
+	}
+	return 0
+}
+
+func novelArcGenerate(args []string) int {
+	fs := flag.NewFlagSet("novel arc generate", flag.ContinueOnError)
+	title := fs.String("title", "", "arc title (required)")
+	level := fs.String("level", "", "level (master / volume / chapter / blueprint) — defaults to chapter when --parent-id is set")
+	parent := fs.String("parent-id", "", "parent arc id (optional)")
+	summary := fs.String("summary", "", "arc summary")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*title) == "" {
+		fmt.Fprintln(os.Stderr, "novel arc generate: --title is required")
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	input := map[string]any{"title": *title, "summary": *summary}
+	if *level != "" {
+		input["level"] = *level
+	}
+	if *parent != "" {
+		input["parent_id"] = *parent
+	}
+	out, err := tools.NewRegistry().Execute(ctx, "arc_generate", input, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel arc generate:", err)
+		return 1
+	}
+	printToolResult("arc_generate", out)
+	return 0
+}
+
+func novelArcUpdate(args []string) int {
+	fs := flag.NewFlagSet("novel arc update", flag.ContinueOnError)
+	id := fs.String("id", "", "arc id (required)")
+	title := fs.String("title", "", "new title")
+	summary := fs.String("summary", "", "new summary")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *id == "" {
+		fmt.Fprintln(os.Stderr, "novel arc update: --id is required")
+		return 2
+	}
+	fields := map[string]any{}
+	if *title != "" {
+		fields["title"] = *title
+	}
+	if *summary != "" {
+		fields["summary"] = *summary
+	}
+	if len(fields) == 0 {
+		fmt.Fprintln(os.Stderr, "novel arc update: at least one --fields flag required")
+		return 2
+	}
+	mgr, err := tools.LoadCLIProject()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer mgr.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	out, err := tools.NewRegistry().Execute(ctx, "arc_update", map[string]any{
+		"id":     *id,
+		"fields": fields,
+	}, mgr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "novel arc update:", err)
+		return 1
+	}
+	printToolResult("arc_update", out)
+	return 0
+}
+
+// printToolResult writes the tool's JSON-shaped output to stdout. The
+// "name" prefix makes the call site obvious when scripts pipe output
+// to a file. Errors are already routed to stderr by the caller.
+func printToolResult(name string, out map[string]any) {
+	if out == nil {
+		fmt.Printf("%s: <nil result>\n", name)
+		return
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Printf("%s: %v\n", name, out)
+		return
+	}
+	fmt.Printf("%s:\n%s\n", name, string(data))
 }

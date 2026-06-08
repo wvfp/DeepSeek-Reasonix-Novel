@@ -458,6 +458,12 @@ type ProviderEntry struct {
 	// Empty = provider default.
 	Thinking string `toml:"thinking"`
 	Effort   string `toml:"effort"`
+	// ExtraHeaders are forwarded verbatim on every HTTP request to this
+	// provider, appended after the standard Content-Type/Authorization/Accept
+	// set. Use for gateway attribution headers (OpenCode Zen requires
+	// HTTP-Referer + X-Title; OpenRouter accepts them too). Header values
+	// cannot override auth or content negotiation — see openai.New.
+	ExtraHeaders map[string]string `toml:"extra_headers"`
 	// NoProxy reaches this provider's base_url directly, never through the proxy.
 	// For China-only endpoints a foreign-exit proxy resets the TLS handshake (#2803).
 	NoProxy bool `toml:"no_proxy"`

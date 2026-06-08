@@ -325,4 +325,20 @@ Configuration:
   Secrets come from the environment via api_key_env (e.g. DEEPSEEK_API_KEY).
   Run 'reasonix setup' to scaffold a config; see docs/SPEC.md.
 `,
+
+	// novel subcommand
+	DeprecationAliasWarning: "warning: 'reasonix %s' is deprecated; use 'novel %s' instead",
+	NovelSubcommandUnknown:   "unknown novel subcommand %q",
+	NovelProjectNotInit:      "Please initialise the novel project first (use the novel_init tool).",
+	NovelHelpChat:            "interactive novel writing session",
+	NovelHelpChapter:         "write a new chapter (or --continue the next one)",
+	NovelHelpArc:             "manage story arcs and chapter outlines",
+	NovelHelpWorld:           "manage worldbuilding entries",
+	NovelHelpCharacter:       "manage characters and voice profiles",
+	NovelHelpReview:          "8-dimension quality review of a chapter",
+	NovelHelpSetup:           "initialise the .novel-weaver/ project in cwd",
+	NovelHelpStats:           "writing statistics",
+	NovelHelpProgress:        "writing progress summary",
+	NovelHelpDoctor:          "diagnose the .novel-weaver/ project",
+	NovelHelpMigrate:         "import a novel-plugin (.novel-weaver) project",
 }
